@@ -1,29 +1,27 @@
 /*
- * Copyright (c) 2012 Adobe Systems Incorporated. All rights reserved.
- *  
+ * Copyright (c) 2012 - present Adobe Systems Incorporated. All rights reserved.
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"), 
- * to deal in the Software without restriction, including without limitation 
- * the rights to use, copy, modify, merge, publish, distribute, sublicense, 
- * and/or sell copies of the Software, and to permit persons to whom the 
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
  * Software is furnished to do so, subject to the following conditions:
- *  
+ *
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- *  
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
- * 
+ *
  */
 
-
-/*jslint vars: true, plusplus: true, devel: true, nomen: true, indent: 4, forin: true, maxerr: 50, regexp: true */
-/*global brackets, define, $, less, window, XMLHttpRequest */
+/*global less */
 
 /**
  * main integrates LiveDevelopment into Brackets
@@ -32,8 +30,6 @@
  *
  *  "Go Live": open or close a Live Development session and visualize the status
  *  "Highlight": toggle source highlighting
- *
- * @require DocumentManager
  */
 define(function main(require, exports, module) {
     "use strict";
@@ -42,21 +38,23 @@ define(function main(require, exports, module) {
         Commands            = require("command/Commands"),
         AppInit             = require("utils/AppInit"),
         LiveDevelopment     = require("LiveDevelopment/LiveDevelopment"),
+        MultiBrowserLiveDev = require("LiveDevelopment/LiveDevMultiBrowser"),
         Inspector           = require("LiveDevelopment/Inspector/Inspector"),
         CommandManager      = require("command/CommandManager"),
         PreferencesManager  = require("preferences/PreferencesManager"),
         Dialogs             = require("widgets/Dialogs"),
+        DefaultDialogs      = require("widgets/DefaultDialogs"),
         UrlParams           = require("utils/UrlParams").UrlParams,
-        Strings             = require("strings");
+        Strings             = require("strings"),
+        ExtensionUtils      = require("utils/ExtensionUtils"),
+        StringUtils         = require("utils/StringUtils");
 
-    var PREFERENCES_KEY = "com.adobe.brackets.live-development";
-    var prefs;
     var params = new UrlParams();
     var config = {
         experimental: false, // enable experimental features
         debug: true, // enable debug output and helpers
         autoconnect: false, // go live automatically after startup?
-        highlight: false, // enable highlighting?
+        highlight: true, // enable highlighting?
         highlightConfig: { // the highlight configuration for the Inspector
             borderColor:  {r: 255, g: 229, b: 153, a: 0.66},
             contentColor: {r: 111, g: 168, b: 220, a: 0.55},
@@ -65,30 +63,84 @@ define(function main(require, exports, module) {
             showInfo: true
         }
     };
-    var _checkMark = "✓"; // Check mark character
     // Status labels/styles are ordered: error, not connected, progress1, progress2, connected.
-    var _statusTooltip = [Strings.LIVE_DEV_STATUS_TIP_NOT_CONNECTED, Strings.LIVE_DEV_STATUS_TIP_NOT_CONNECTED,
-                          Strings.LIVE_DEV_STATUS_TIP_PROGRESS1, Strings.LIVE_DEV_STATUS_TIP_PROGRESS2,
-                          Strings.LIVE_DEV_STATUS_TIP_CONNECTED, Strings.LIVE_DEV_STATUS_TIP_OUT_OF_SYNC];  // Status indicator tooltip
-    var _statusStyle = ["warning", "", "info", "info", "success", "out-of-sync"];  // Status indicator's CSS class
-    var _allStatusStyles = _statusStyle.join(" ");
+    var _status,
+        _allStatusStyles = ["warning", "info", "success", "out-of-sync", "sync-error"].join(" ");
 
     var _$btnGoLive; // reference to the GoLive button
-    var _$btnHighlight; // reference to the HighlightButton
+
+    // current selected implementation (LiveDevelopment | LiveDevMultiBrowser)
+    var LiveDevImpl;
+
+    // "livedev.multibrowser" preference
+    var PREF_MULTIBROWSER = "multibrowser";
+    var prefs = PreferencesManager.getExtensionPrefs("livedev");
+    var multiBrowserPref = prefs.definePreference(PREF_MULTIBROWSER, "boolean", false, {
+        description: Strings.DESCRIPTION_LIVE_DEV_MULTIBROWSER
+    });
+
+    // "livedev.remoteHighlight" preference
+    var PREF_REMOTEHIGHLIGHT = "remoteHighlight";
+    var remoteHighlightPref = prefs.definePreference(PREF_REMOTEHIGHLIGHT, "object", {
+        animateStartValue: {
+            "background-color": "rgba(0, 162, 255, 0.5)",
+            "opacity": 0
+        },
+        animateEndValue: {
+            "background-color": "rgba(0, 162, 255, 0)",
+            "opacity": 0.6
+        },
+        "paddingStyling": {
+            "border-width": "1px",
+            "border-style": "dashed",
+            "border-color": "rgba(0, 162, 255, 0.5)"
+        },
+        "marginStyling": {
+            "background-color": "rgba(21, 165, 255, 0.58)"
+        },
+        "borderColor": "rgba(21, 165, 255, 0.85)",
+        "showPaddingMargin": true
+    }, {
+        description: Strings.DESCRIPTION_LIVE_DEV_HIGHLIGHT_SETTINGS
+    });
+    
+    /** Toggles or sets the preference **/
+    function _togglePref(key, value) {
+        var val,
+            oldPref = !!prefs.get(key);
+
+        if (value === undefined) {
+            val = !oldPref;
+        } else {
+            val = !!value;
+        }
+
+        // update menu
+        if (val !== oldPref) {
+            prefs.set(key, val);
+        }
+
+        return val;
+    }
+
+    /* Toggles or sets the "livedev.multibrowser" preference */
+    function _toggleLivePreviewMultiBrowser(value) {
+        var val = _togglePref(PREF_MULTIBROWSER, value);
+
+        CommandManager.get(Commands.TOGGLE_LIVE_PREVIEW_MB_MODE).setChecked(val);
+        // Issue #10217: multi-browser does not support user server, so disable
+        // the setting if it is enabled.
+        CommandManager.get(Commands.FILE_PROJECT_SETTINGS).setEnabled(!val);
+    }
 
     /** Load Live Development LESS Style */
     function _loadStyles() {
-        var request = new XMLHttpRequest();
-        request.open("GET", "LiveDevelopment/main.less", true);
-        request.onload = function onLoad(event) {
-            var parser = new less.Parser();
-            parser.parse(request.responseText, function onParse(err, tree) {
-                console.assert(!err, err);
-                $("<style>" + tree.toCSS() + "</style>")
-                    .appendTo(window.document.head);
-            });
-        };
-        request.send(null);
+        var lessText = require("text!LiveDevelopment/main.less");
+
+        less.render(lessText, function onParse(err, tree) {
+            console.assert(!err, err);
+            ExtensionUtils.addEmbeddedStyleSheet(tree.css);
+        });
     }
 
     /**
@@ -115,72 +167,147 @@ define(function main(require, exports, module) {
         }
     }
 
-    /** Toggles LiveDevelopment and synchronizes the state of UI elements that reports LiveDevelopment status */
+    /**
+     * Toggles LiveDevelopment and synchronizes the state of UI elements that reports LiveDevelopment status
+     *
+     * Stop Live Dev when in an active state (ACTIVE, OUT_OF_SYNC, SYNC_ERROR).
+     * Start Live Dev when in an inactive state (ERROR, INACTIVE).
+     * Do nothing when in a connecting state (CONNECTING, LOADING_AGENTS).
+     */
     function _handleGoLiveCommand() {
-        if (LiveDevelopment.status >= LiveDevelopment.STATUS_CONNECTING) {
-            LiveDevelopment.close();
-        } else {
-            if (!params.get("skipLiveDevelopmentInfo") && !prefs.getValue("afterFirstLaunch")) {
-                prefs.setValue("afterFirstLaunch", "true");
+        if (LiveDevImpl.status >= LiveDevImpl.STATUS_ACTIVE) {
+            LiveDevImpl.close();
+        } else if (LiveDevImpl.status <= LiveDevImpl.STATUS_INACTIVE) {
+            if (!params.get("skipLiveDevelopmentInfo") && !PreferencesManager.getViewState("livedev.afterFirstLaunch")) {
+                PreferencesManager.setViewState("livedev.afterFirstLaunch", "true");
                 Dialogs.showModalDialog(
-                    Dialogs.DIALOG_ID_INFO,
+                    DefaultDialogs.DIALOG_ID_INFO,
                     Strings.LIVE_DEVELOPMENT_INFO_TITLE,
                     Strings.LIVE_DEVELOPMENT_INFO_MESSAGE
                 ).done(function (id) {
-                    LiveDevelopment.open();
+                    LiveDevImpl.open();
                 });
             } else {
-                LiveDevelopment.open();
+                LiveDevImpl.open();
             }
         }
     }
 
+    /** Called on status change */
+    function _showStatusChangeReason(reason) {
+        // Destroy the previous twipsy (options are not updated otherwise)
+        _$btnGoLive.twipsy("hide").removeData("twipsy");
+
+        // If there was no reason or the action was an explicit request by the user, don't show a twipsy
+        if (!reason || reason === "explicit_close") {
+            return;
+        }
+
+        // Translate the reason
+        var translatedReason = Strings["LIVE_DEV_" + reason.toUpperCase()];
+        if (!translatedReason) {
+            translatedReason = StringUtils.format(Strings.LIVE_DEV_CLOSED_UNKNOWN_REASON, reason);
+        }
+
+        // Configure the twipsy
+        var options = {
+            placement: "left",
+            trigger: "manual",
+            autoHideDelay: 5000,
+            title: function () {
+                return translatedReason;
+            }
+        };
+
+        // Show the twipsy with the explanation
+        _$btnGoLive.twipsy(options).twipsy("show");
+    }
+
     /** Create the menu item "Go Live" */
     function _setupGoLiveButton() {
-        _$btnGoLive = $("#toolbar-go-live");
-        _$btnGoLive.click(function onGoLive() {
-            _handleGoLiveCommand();
-        });
-        $(LiveDevelopment).on("statusChange", function statusChange(event, status) {
+        if (!_$btnGoLive) {
+            _$btnGoLive = $("#toolbar-go-live");
+            _$btnGoLive.click(function onGoLive() {
+                _handleGoLiveCommand();
+            });
+        }
+        LiveDevImpl.on("statusChange", function statusChange(event, status, reason) {
             // status starts at -1 (error), so add one when looking up name and style
-            // See the comments at the top of LiveDevelopment.js for details on the 
+            // See the comments at the top of LiveDevelopment.js for details on the
             // various status codes.
-            _setLabel(_$btnGoLive, null, _statusStyle[status + 1], _statusTooltip[status + 1]);
+            _setLabel(_$btnGoLive, null, _status[status + 1].style, _status[status + 1].tooltip);
+            _showStatusChangeReason(reason);
             if (config.autoconnect) {
                 window.sessionStorage.setItem("live.enabled", status === 3);
             }
         });
 
         // Initialize tooltip for 'not connected' state
-        _setLabel(_$btnGoLive, null, _statusStyle[1], _statusTooltip[1]);
+        _setLabel(_$btnGoLive, null, _status[1].style, _status[1].tooltip);
     }
-    
+
     /** Maintains state of the Live Preview menu item */
     function _setupGoLiveMenu() {
-        $(LiveDevelopment).on("statusChange", function statusChange(event, status) {
+        LiveDevImpl.on("statusChange", function statusChange(event, status) {
             // Update the checkmark next to 'Live Preview' menu item
-            // Add checkmark when status is STATUS_ACTIVE; otherwise remove it 
-            CommandManager.get(Commands.FILE_LIVE_FILE_PREVIEW).setChecked(status === LiveDevelopment.STATUS_ACTIVE);
+            // Add checkmark when status is STATUS_ACTIVE; otherwise remove it
+            CommandManager.get(Commands.FILE_LIVE_FILE_PREVIEW).setChecked(status === LiveDevImpl.STATUS_ACTIVE);
+            CommandManager.get(Commands.FILE_LIVE_HIGHLIGHT).setEnabled(status === LiveDevImpl.STATUS_ACTIVE);
         });
     }
 
-    /** Create the menu item "Highlight" */
-    function _setupHighlightButton() {
-        // TODO: this should be moved into index.html like the Go Live button once it's re-enabled
-        _$btnHighlight = $("<a href=\"#\">Highlight </a>");
-        $(".nav").append($("<li>").append(_$btnHighlight));
-        _$btnHighlight.click(function onClick() {
-            config.highlight = !config.highlight;
-            if (config.highlight) {
-                _setLabel(_$btnHighlight, _checkMark, "success");
-            } else {
-                _setLabel(_$btnHighlight);
-                LiveDevelopment.hideHighlight();
-            }
-        });
+    function _updateHighlightCheckmark() {
+        CommandManager.get(Commands.FILE_LIVE_HIGHLIGHT).setChecked(config.highlight);
+    }
+
+    function _handlePreviewHighlightCommand() {
+        config.highlight = !config.highlight;
+        _updateHighlightCheckmark();
         if (config.highlight) {
-            _setLabel(_$btnHighlight, _checkMark, "success");
+            LiveDevImpl.showHighlight();
+        } else {
+            LiveDevImpl.hideHighlight();
         }
+        PreferencesManager.setViewState("livedev.highlight", config.highlight);
+    }
+
+    /**
+     * Sets the MultiBrowserLiveDev implementation if multibrowser is truthy,
+     * keeps default LiveDevelopment implementation based on CDT otherwise.
+     * It also resets the listeners and UI elements.
+     */
+    function _setImplementation(multibrowser) {
+        if (multibrowser) {
+            // set implemenation
+            LiveDevImpl = MultiBrowserLiveDev;
+            // update styles for UI status
+            _status = [
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_NOT_CONNECTED, style: "warning" },
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_NOT_CONNECTED, style: "" },
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_PROGRESS1, style: "info" },
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_CONNECTED, style: "success" },
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_OUT_OF_SYNC, style: "out-of-sync" },
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_SYNC_ERROR, style: "sync-error" },
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_PROGRESS1, style: "info" },
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_PROGRESS1, style: "info" }
+            ];
+        } else {
+            LiveDevImpl = LiveDevelopment;
+            _status = [
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_NOT_CONNECTED, style: "warning" },
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_NOT_CONNECTED, style: "" },
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_PROGRESS1, style: "info" },
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_PROGRESS2, style: "info" },
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_CONNECTED, style: "success" },
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_OUT_OF_SYNC, style: "out-of-sync" },
+                { tooltip: Strings.LIVE_DEV_STATUS_TIP_SYNC_ERROR, style: "sync-error" }
+            ];
+        }
+        // setup status changes listeners for new implementation
+        _setupGoLiveButton();
+        _setupGoLiveMenu();
+        // toggle the menu
+        _toggleLivePreviewMultiBrowser(multibrowser);
     }
 
     /** Setup window references to useful LiveDevelopment modules */
@@ -190,35 +317,96 @@ define(function main(require, exports, module) {
         window.report = function report(params) { window.params = params; console.info(params); };
     }
 
+    /** force reload the live preview */
+    function _handleReloadLivePreviewCommand() {
+        if (LiveDevelopment.status >= LiveDevelopment.STATUS_ACTIVE) {
+            LiveDevelopment.reload();
+        }
+    }
+
     /** Initialize LiveDevelopment */
-    function init() {
-        prefs = PreferencesManager.getPreferenceStorage(PREFERENCES_KEY);
+    AppInit.appReady(function () {
         params.parse();
+        config.remoteHighlight = prefs.get(PREF_REMOTEHIGHLIGHT);
 
         Inspector.init(config);
         LiveDevelopment.init(config);
-        _loadStyles();
-        _setupGoLiveButton();
-        _setupGoLiveMenu();
 
-        /* _setupHighlightButton(); FUTURE - Highlight button */
+        // init experimental multi-browser implementation
+        // it can be enable by setting 'livedev.multibrowser' preference to true.
+        // It has to be initiated at this point in case of dynamically switching
+        // by changing the preference value.
+        MultiBrowserLiveDev.init(config);
+
+        _loadStyles();
+        _updateHighlightCheckmark();
+
+        _setImplementation(prefs.get(PREF_MULTIBROWSER));
+
         if (config.debug) {
             _setupDebugHelpers();
         }
 
         // trigger autoconnect
-        if (config.autoconnect && window.sessionStorage.getItem("live.enabled") === "true") {
-            AppInit.appReady(function () {
-                if (DocumentManager.getCurrentDocument()) {
-                    _handleGoLiveCommand();
+        if (config.autoconnect &&
+                window.sessionStorage.getItem("live.enabled") === "true" &&
+                DocumentManager.getCurrentDocument()) {
+            _handleGoLiveCommand();
+        }
+
+        // Redraw highlights when window gets focus. This ensures that the highlights
+        // will be in sync with any DOM changes that may have occurred.
+        $(window).focus(function () {
+            if (Inspector.connected() && config.highlight) {
+                LiveDevelopment.redrawHighlight();
+            }
+        });
+
+        multiBrowserPref
+            .on("change", function () {
+                // Stop the current session if it is open and set implementation based on
+                // the pref value. We could start the new implementation immediately, but
+                // since the current document is potentially a user preferences file, Live
+                // Preview will not locate the html file to serve.
+                if (LiveDevImpl && LiveDevImpl.status >= LiveDevImpl.STATUS_ACTIVE) {
+                    LiveDevImpl.close()
+                        .done(function () {
+                            // status changes will now be listened by the new implementation
+                            LiveDevImpl.off("statusChange");
+                            _setImplementation(prefs.get(PREF_MULTIBROWSER));
+                        });
+                } else {
+                    _setImplementation(prefs.get(PREF_MULTIBROWSER));
                 }
             });
-        }
-    }
-    window.setTimeout(init);
-   
+        
+        remoteHighlightPref
+            .on("change", function () {
+                config.remoteHighlight = prefs.get(PREF_REMOTEHIGHLIGHT);
+                       
+                if (LiveDevImpl && LiveDevImpl.status >= LiveDevImpl.STATUS_ACTIVE) {
+                    LiveDevImpl.agents.remote.call("updateConfig",JSON.stringify(config));
+                }
+            });
+
+    });
+
+    // init prefs
+    PreferencesManager.stateManager.definePreference("livedev.highlight", "boolean", true)
+        .on("change", function () {
+            config.highlight = PreferencesManager.getViewState("livedev.highlight");
+            _updateHighlightCheckmark();
+        });
+
+    config.highlight = PreferencesManager.getViewState("livedev.highlight");
+
+    // init commands
     CommandManager.register(Strings.CMD_LIVE_FILE_PREVIEW,  Commands.FILE_LIVE_FILE_PREVIEW, _handleGoLiveCommand);
+    CommandManager.register(Strings.CMD_LIVE_HIGHLIGHT, Commands.FILE_LIVE_HIGHLIGHT, _handlePreviewHighlightCommand);
+    CommandManager.register(Strings.CMD_RELOAD_LIVE_PREVIEW, Commands.CMD_RELOAD_LIVE_PREVIEW, _handleReloadLivePreviewCommand);
+    CommandManager.register(Strings.CMD_TOGGLE_LIVE_PREVIEW_MB_MODE, Commands.TOGGLE_LIVE_PREVIEW_MB_MODE, _toggleLivePreviewMultiBrowser);
+
+    CommandManager.get(Commands.FILE_LIVE_HIGHLIGHT).setEnabled(false);
 
     // Export public functions
-    exports.init = init;
 });

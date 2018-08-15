@@ -1,455 +1,688 @@
 /*
- * Copyright (c) 2012 Adobe Systems Incorporated. All rights reserved.
- *  
+ * Copyright (c) 2012 - present Adobe Systems Incorporated. All rights reserved.
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"), 
- * to deal in the Software without restriction, including without limitation 
- * the rights to use, copy, modify, merge, publish, distribute, sublicense, 
- * and/or sell copies of the Software, and to permit persons to whom the 
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
  * Software is furnished to do so, subject to the following conditions:
- *  
+ *
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- *  
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
- * 
+ *
  */
 
-
-/*jslint vars: true, plusplus: true, devel: true, nomen: true, indent: 4, maxerr: 50 */
-/*global define, $, window, brackets */
-
+/*
+ * __CodeHintManager Overview:__
+ *
+ * The CodeHintManager mediates the interaction between the editor and a
+ * collection of hint providers. If hints are requested explicitly by the
+ * user, then the providers registered for the current language are queried
+ * for their ability to provide hints in order of descending priority by
+ * way their hasHints methods. Character insertions may also constitute an
+ * implicit request for hints; consequently, providers for the current
+ * language are also queried on character insertion for both their ability to
+ * provide hints and also for the suitability of providing implicit hints
+ * in the given editor context.
+ *
+ * Once a provider responds affirmatively to a request for hints, the
+ * manager begins a hinting session with that provider, begins to query
+ * that provider for hints by way of its getHints method, and opens the
+ * hint list window. The hint list is kept open for the duration of the
+ * current session. The manager maintains the session until either:
+ *
+ *  1. the provider gives a null response to a request for hints;
+ *  2. a deferred response to getHints fails to resolve;
+ *  3. the user explicitly dismisses the hint list window;
+ *  4. the editor is closed or becomes inactive; or
+ *  5. the editor undergoes a "complex" change, e.g., a multi-character
+ *     insertion, deletion or navigation.
+ *
+ * Single-character insertions, deletions or navigations may not
+ * invalidate the current session; in which case, each such change
+ * precipitates a successive call to getHints.
+ *
+ * If the user selects a hint from the rendered hint list then the
+ * provider is responsible for inserting the hint into the editor context
+ * for the current session by way of its insertHint method. The provider
+ * may use the return value of insertHint to request that an additional
+ * explicit hint request be triggered, potentially beginning a new
+ * session.
+ *
+ *
+ * __CodeHintProvider Overview:__
+ *
+ * A code hint provider should implement the following three functions:
+ *
+ * - `CodeHintProvider.hasHints(editor, implicitChar)`
+ * - `CodeHintProvider.getHints(implicitChar)`
+ * - `CodeHintProvider.insertHint(hint)`
+ *
+ * The behavior of these three functions is described in detail below.
+ *
+ * __CodeHintProvider.hasHints(editor, implicitChar)__
+ *
+ * The method by which a provider indicates intent to provide hints for a
+ * given editor. The manager calls this method both when hints are
+ * explicitly requested (via, e.g., Ctrl-Space) and when they may be
+ * implicitly requested as a result of character insertion in the editor.
+ * If the provider responds negatively then the manager may query other
+ * providers for hints. Otherwise, a new hinting session begins with this
+ * provider, during which the manager may repeatedly query the provider
+ * for hints via the getHints method. Note that no other providers will be
+ * queried until the hinting session ends.
+ *
+ * The implicitChar parameter is used to determine whether the hinting
+ * request is explicit or implicit. If the string is null then hints were
+ * explicitly requested and the provider should reply based on whether it
+ * is possible to return hints for the given editor context. Otherwise,
+ * the string contains just the last character inserted into the editor's
+ * document and the request for hints is implicit. In this case, the
+ * provider should determine whether it is both possible and appropriate
+ * to show hints. Because implicit hints can be triggered by every
+ * character insertion, hasHints may be called frequently; consequently,
+ * the provider should endeavor to return a value as quickly as possible.
+ *
+ * Because calls to hasHints imply that a hinting session is about to
+ * begin, a provider may wish to clean up cached data from previous
+ * sessions in this method. Similarly, if the provider returns true, it
+ * may wish to prepare to cache data suitable for the current session. In
+ * particular, it should keep a reference to the editor object so that it
+ * can access the editor in future calls to getHints and insertHints.
+ *
+ * param {Editor} editor
+ * A non-null editor object for the active window.
+ *
+ * param {string} implicitChar
+ * Either null, if the hinting request was explicit, or a single character
+ * that represents the last insertion and that indicates an implicit
+ * hinting request.
+ *
+ * return {boolean}
+ * Determines whether the current provider is able to provide hints for
+ * the given editor context and, in case implicitChar is non- null,
+ * whether it is appropriate to do so.
+ *
+ *
+ * __CodeHintProvider.getHints(implicitChar)__
+ *
+ * The method by which a provider provides hints for the editor context
+ * associated with the current session. The getHints method is called only
+ * if the provider asserted its willingness to provide hints in an earlier
+ * call to hasHints. The provider may return null or false, which indicates
+ * that the manager should end the current hinting session and close the hint
+ * list window; or true, which indicates that the manager should end the
+ * current hinting session but immediately attempt to begin a new hinting
+ * session by querying registered providers. Otherwise, the provider should
+ * return a response object that contains the following properties:
+ *
+ *  1. hints, a sorted array hints that the provider could later insert
+ *     into the editor;
+ *  2. match, a string that the manager may use to emphasize substrings of
+ *     hints in the hint list (case-insensitive); and
+ *  3. selectInitial, a boolean that indicates whether or not the
+ *     first hint in the list should be selected by default.
+ *  4. handleWideResults, a boolean (or undefined) that indicates whether
+ *     to allow result string to stretch width of display.
+ *
+ * If the array of
+ * hints is empty, then the manager will render an empty list, but the
+ * hinting session will remain open and the value of the selectInitial
+ * property is irrelevant.
+ *
+ * Alternatively, the provider may return a jQuery.Deferred object
+ * that resolves with an object with the structure described above. In
+ * this case, the manager will initially render the hint list window with
+ * a throbber and will render the actual list once the deferred object
+ * resolves to a response object. If a hint list has already been rendered
+ * (from an earlier call to getHints), then the old list will continue
+ * to be displayed until the new deferred has resolved.
+ *
+ * Both the manager and the provider can reject the deferred object. The
+ * manager will reject the deferred if the editor changes state (e.g., the
+ * user types a character) or if the hinting session ends (e.g., the user
+ * explicitly closes the hints by pressing escape). The provider can use
+ * this event to, e.g., abort an expensive computation. Consequently, the
+ * provider may assume that getHints will not be called again until the
+ * deferred object from the current call has resolved or been rejected. If
+ * the provider rejects the deferred, the manager will end the hinting
+ * session.
+ *
+ * The getHints method may be called by the manager repeatedly during a
+ * hinting session. Providers may wish to cache information for efficiency
+ * that may be useful throughout these sessions. The same editor context
+ * will be used throughout a session, and will only change during the
+ * session as a result of single-character insertions, deletions and
+ * cursor navigations. The provider may assume that, throughout the
+ * lifetime of the session, the getHints method will be called exactly
+ * once for each such editor change. Consequently, the provider may also
+ * assume that the document will not be changed outside of the editor
+ * during a session.
+ *
+ * param {string} implicitChar
+ * Either null, if the request to update the hint list was a result of
+ * navigation, or a single character that represents the last insertion.
+ *
+ *     return {jQuery.Deferred|{
+ *          hints: Array.<string|jQueryObject>,
+ *          match: string,
+ *          selectInitial: boolean,
+ *          handleWideResults: boolean}}
+ *
+ * Null if the provider wishes to end the hinting session. Otherwise, a
+ * response object, possibly deferred, that provides 1. a sorted array
+ * hints that consists either of strings or jQuery objects; 2. a string
+ * match, possibly null, that is used by the manager to emphasize
+ * matching substrings when rendering the hint list; and 3. a boolean that
+ * indicates whether the first result, if one exists, should be selected
+ * by default in the hint list window. If match is non-null, then the
+ * hints should be strings.
+ *
+ * If the match is null, the manager will not
+ * attempt to emphasize any parts of the hints when rendering the hint
+ * list; instead the provider may return strings or jQuery objects for
+ * which emphasis is self-contained. For example, the strings may contain
+ * substrings that wrapped in bold tags. In this way, the provider can
+ * choose to let the manager handle emphasis for the simple and common case
+ * of prefix matching, or can provide its own emphasis if it wishes to use
+ * a more sophisticated matching algorithm.
+ *
+ *
+ * __CodeHintProvider.insertHint(hint)__
+ *
+ * The method by which a provider inserts a hint into the editor context
+ * associated with the current session. The provider may assume that the
+ * given hint was returned by the provider in some previous call in the
+ * current session to getHints, but not necessarily the most recent call.
+ * After the insertion has been performed, the current hinting session is
+ * closed. The provider should return a boolean value to indicate whether
+ * or not the end of the session should be immediately followed by a new
+ * explicit hinting request, which may result in a new hinting session
+ * being opened with some provider, but not necessarily the current one.
+ *
+ * param {string} hint
+ * The hint to be inserted into the editor context for the current session.
+ *
+ * return {boolean}
+ * Indicates whether the manager should follow hint insertion with an
+ * explicit hint request.
+ *
+ *
+ * __CodeHintProvider.insertHintOnTab__
+ *
+ * type {?boolean} insertHintOnTab
+ * Indicates whether the CodeHintManager should request that the provider of
+ * the current session insert the currently selected hint on tab key events,
+ * or if instead a tab character should be inserted into the editor. If omitted,
+ * the fallback behavior is determined by the CodeHintManager. The default
+ * behavior is to insert a tab character, but this can be changed with the
+ * insertHintOnTab Preference.
+ */
 define(function (require, exports, module) {
     "use strict";
-    
+
     // Load dependent modules
-    var HTMLUtils       = require("language/HTMLUtils"),
-        Menus           = require("command/Menus"),
-        StringUtils     = require("utils/StringUtils"),
-        EditorManager   = require("editor/EditorManager"),
-        PopUpManager    = require("widgets/PopUpManager"),
-        ViewUtils       = require("utils/ViewUtils"),
-        KeyEvent        = require("utils/KeyEvent");
+    var Commands            = require("command/Commands"),
+        CommandManager      = require("command/CommandManager"),
+        EditorManager       = require("editor/EditorManager"),
+        Strings             = require("strings"),
+        KeyEvent            = require("utils/KeyEvent"),
+        CodeHintList        = require("editor/CodeHintList").CodeHintList,
+        PreferencesManager  = require("preferences/PreferencesManager");
 
+    var hintProviders    = { "all" : [] },
+        lastChar         = null,
+        sessionProvider  = null,
+        sessionEditor    = null,
+        hintList         = null,
+        deferredHints    = null,
+        keyDownEditor    = null,
+        codeHintsEnabled = true,
+        codeHintOpened   = false;
 
-    var hintProviders = [],
-        hintList,
-        shouldShowHintsOnChange = false,
-        keyDownEditor;
+    PreferencesManager.definePreference("showCodeHints", "boolean", true, {
+        description: Strings.DESCRIPTION_SHOW_CODE_HINTS
+    });
+    PreferencesManager.definePreference("insertHintOnTab", "boolean", false, {
+        description: Strings.DESCRIPTION_INSERT_HINT_ON_TAB
+    });
+    PreferencesManager.definePreference("maxCodeHints", "number", 50, {
+        description: Strings.DESCRIPTION_MAX_CODE_HINTS
+    });
 
+    PreferencesManager.on("change", "showCodeHints", function () {
+        codeHintsEnabled = PreferencesManager.get("showCodeHints");
+    });
 
     /**
-     * @constructor
-     *
-     * Displays a popup list of code completions.
-     * Currently only HTML tags are supported, but this will greatly be extended in coming sprint
-     * to include: extensibility API, HTML attributes hints, JavaScript hints, CSS hints
+     * Comparator to sort providers from high to low priority
      */
-    function CodeHintList() {
-        this.currentProvider = null;
-        this.query = {queryStr: null};
-        this.displayList = [];
-        this.options = {
-            maxResults: 999
-        };
+    function _providerSort(a, b) {
+        return b.priority - a.priority;
+    }
 
-        this.opened = false;
-        this.selectedIndex = -1;
-        this.editor = null;
+    /**
+     * The method by which a CodeHintProvider registers its willingness to
+     * providing hints for editors in a given language.
+     *
+     * @param {!CodeHintProvider} provider
+     * The hint provider to be registered, described below.
+     *
+     * @param {!Array.<string>} languageIds
+     * The set of language ids for which the provider is capable of
+     * providing hints. If the special language id name "all" is included then
+     * the provider may be called for any language.
+     *
+     * @param {?number} priority
+     * Used to break ties among hint providers for a particular language.
+     * Providers with a higher number will be asked for hints before those
+     * with a lower priority value. Defaults to zero.
+     */
+    function registerHintProvider(providerInfo, languageIds, priority) {
+        var providerObj = { provider: providerInfo,
+                            priority: priority || 0 };
 
-        this.$hintMenu = $("<li class='dropdown codehint-menu'></li>");
-        var $toggle = $("<a href='#' class='dropdown-toggle'></a>")
-            .hide();
-
-        this.$hintMenu.append($toggle)
-            .append("<ul class='dropdown-menu'></ul>");
+        if (languageIds.indexOf("all") !== -1) {
+            // Ignore anything else in languageIds and just register for every language. This includes
+            // the special "all" language since its key is in the hintProviders map from the beginning.
+            var languageId;
+            for (languageId in hintProviders) {
+                if (hintProviders.hasOwnProperty(languageId)) {
+                    hintProviders[languageId].push(providerObj);
+                    hintProviders[languageId].sort(_providerSort);
+                }
+            }
+        } else {
+            languageIds.forEach(function (languageId) {
+                if (!hintProviders[languageId]) {
+                    // Initialize provider list with any existing all-language providers
+                    hintProviders[languageId] = Array.prototype.concat(hintProviders.all);
+                }
+                hintProviders[languageId].push(providerObj);
+                hintProviders[languageId].sort(_providerSort);
+            });
+        }
     }
 
     /**
      * @private
-     * Enters the code completion text into the editor and closes list if the provider 
-     * returns true. Otherwise, get a new query and update the list based on the new query.
-     * @string {string} completion - text to insert into current code editor
+     * Remove a code hint provider
+     * @param {!CodeHintProvider} provider Code hint provider to remove
+     * @param {(string|Array.<string>)=} targetLanguageId Optional set of
+     *     language IDs for languages to remove the provider for. Defaults
+     *     to all languages.
      */
-    CodeHintList.prototype._handleItemClick = function (completion) {
-        if (this.currentProvider.handleSelect(completion, this.editor, this.editor.getCursorPos())) {
-            this.close();
+    function _removeHintProvider(provider, targetLanguageId) {
+        var index,
+            providers,
+            targetLanguageIdArr;
+
+        if (Array.isArray(targetLanguageId)) {
+            targetLanguageIdArr = targetLanguageId;
+        } else if (targetLanguageId) {
+            targetLanguageIdArr = [targetLanguageId];
         } else {
-            this.updateQueryAndList();
+            targetLanguageIdArr = Object.keys(hintProviders);
         }
-    };
 
-    /**
-     * Adds a single item to the hint list
-     * @param {string} name
-     */
-    CodeHintList.prototype.addItem = function (name) {
-        var self = this;
-        var displayName = name.replace(
-            new RegExp(StringUtils.regexEscape(this.query.queryStr), "i"),
-            "<strong>$&</strong>"
-        );
+        targetLanguageIdArr.forEach(function (languageId) {
+            providers = hintProviders[languageId];
 
-        var $item = $("<li><a href='#'><span class='codehint-item'>" + displayName + "</span></a></li>")
-            .on("click", function (e) {
-                // Don't let the click propagate upward (otherwise it will hit the close handler in
-                // bootstrap-dropdown).
-                e.stopPropagation();
-                self._handleItemClick(name);
-            });
-
-        this.$hintMenu.find("ul.dropdown-menu")
-            .append($item);
-    };
-
-    /**
-     * Rebuilds the hint list based on this.query
-     */
-    CodeHintList.prototype.updateList = function () {
-        this.displayList = this.currentProvider.search(this.query);
-        this.buildListView();
-    };
-
-    /**
-     * Removes all list items from hint list
-     */
-    CodeHintList.prototype.clearList = function () {
-        this.$hintMenu.find("li").remove();
-    };
-            
-    /**
-     * Rebuilds the list items for the hint list based on this.displayList
-     */
-    CodeHintList.prototype.buildListView = function () {
-        this.clearList();
-        var self = this;
-        var count = 0;
-        $.each(this.displayList, function (index, item) {
-            if (count > self.options.maxResults) {
-                return false;
-            }
-            self.addItem(item);
-            count++;
-        });
-
-        if (count === 0) {
-            this.close();
-        } else {
-            // Select the first item in the list
-            this.setSelectedIndex(0);
-        }
-    };
-
-
-    /**
-     * Selects the item in the hint list specified by index
-     * @param {Number} index
-     */
-    CodeHintList.prototype.setSelectedIndex = function (index) {
-        var items = this.$hintMenu.find("li");
-        
-        // Range check
-        index = Math.max(0, Math.min(index, items.length - 1));
-        
-        // Clear old highlight
-        if (this.selectedIndex !== -1) {
-            $(items[this.selectedIndex]).find("a").removeClass("highlight");
-        }
-        
-        // Highlight the new selected item
-        this.selectedIndex = index;
-
-        if (this.selectedIndex !== -1) {
-            var $item = $(items[this.selectedIndex]);
-            var $view = this.$hintMenu.find("ul.dropdown-menu");
-
-            ViewUtils.scrollElementIntoView($view, $item, false);
-            $item.find("a").addClass("highlight");
-        }
-    };
-    
-    
-    /**
-     * Gets the new query from the current provider and rebuilds the hint list based on the new one.
-     */
-    CodeHintList.prototype.updateQueryAndList = function () {
-        this.query = this.currentProvider.getQueryInfo(this.editor, this.editor.getCursorPos());
-        this.updateList();
-
-        // Update the CodeHintList location
-        if (this.displayList.length) {
-            var hintPos = this.calcHintListLocation();
-            this.$hintMenu.css({"left": hintPos.left, "top": hintPos.top});
-        }
-    };
-
-    /**
-     * Handles key presses when the hint list is being displayed
-     * @param {Editor} editor
-     * @param {KeyBoardEvent} keyEvent
-     */
-    CodeHintList.prototype.handleKeyEvent = function (editor, event) {
-        var keyCode = event.keyCode;
-        
-        // Up arrow, down arrow and enter key are always handled here
-        if (event.type !== "keypress") {
-
-            if (keyCode === KeyEvent.DOM_VK_RETURN || keyCode === KeyEvent.DOM_VK_TAB ||
-                    keyCode === KeyEvent.DOM_VK_UP || keyCode === KeyEvent.DOM_VK_DOWN ||
-                    keyCode === KeyEvent.DOM_VK_PAGE_UP || keyCode === KeyEvent.DOM_VK_PAGE_DOWN) {
-
-                var isNavigationKey = (keyCode !== KeyEvent.DOM_VK_RETURN && keyCode !== KeyEvent.DOM_VK_TAB);
-                if (event.type === "keydown") {
-                    if (keyCode === KeyEvent.DOM_VK_UP) {
-                        // Up arrow
-                        this.setSelectedIndex(this.selectedIndex - 1);
-                    } else if (keyCode === KeyEvent.DOM_VK_DOWN) {
-                        // Down arrow
-                        this.setSelectedIndex(this.selectedIndex + 1);
-                    } else if (keyCode === KeyEvent.DOM_VK_PAGE_UP) {
-                        // Page Up
-                        this.setSelectedIndex(this.selectedIndex - this.getItemsPerPage());
-                    } else if (keyCode === KeyEvent.DOM_VK_PAGE_DOWN) {
-                        // Page Down
-                        this.setSelectedIndex(this.selectedIndex + this.getItemsPerPage());
-                    } else {
-                        // Enter/return key or Tab key
-                        // Trigger a click handler to commmit the selected item
-                        $(this.$hintMenu.find("li")[this.selectedIndex]).triggerHandler("click");
-                    }
+            for (index = 0; index < providers.length; index++) {
+                if (providers[index].provider === provider) {
+                    providers.splice(index, 1);
+                    break;
                 }
-
-                event.preventDefault();
-                return;
-            }
-        }
-        
-        // All other key events trigger a rebuild of the list, but only
-        // on keyup events
-        if (event.type === "keyup") {
-            this.updateQueryAndList();
-        }
-    };
-
-    /**
-     * Return true if the CodeHintList is open.
-     * @return {Boolean}
-     */
-    CodeHintList.prototype.isOpen = function () {
-        // We don't get a notification when the dropdown closes. The best
-        // we can do is keep an "opened" flag and check to see if we
-        // still have the "open" class applied.
-        if (this.opened && !this.$hintMenu.hasClass("open")) {
-            this.opened = false;
-        }
-        
-        return this.opened;
-    };
-    
-    /**
-     * Displays the hint list at the current cursor position
-     * @param {Editor} editor
-     */
-    CodeHintList.prototype.open = function (editor) {
-        var self = this;
-        this.editor = editor;
-
-        Menus.closeAll();
-
-        this.currentProvider = null;
-        $.each(hintProviders, function (index, item) {
-            var query = item.getQueryInfo(self.editor, self.editor.getCursorPos());
-            if (query.queryStr !== null) {
-                self.query = query;
-                self.currentProvider = item;
-                return false;
             }
         });
-        if (!this.currentProvider) {
+    }
+
+    /**
+     *  Return the array of hint providers for the given language id.
+     *  This gets called (potentially) on every keypress. So, it should be fast.
+     *
+     * @param {!string} languageId
+     * @return {?Array.<{provider: Object, priority: number}>}
+     */
+    function _getProvidersForLanguageId(languageId) {
+        var providers = hintProviders[languageId] || hintProviders.all;
+
+        // Exclude providers that are explicitly disabled in the preferences.
+        // All code hint providers that do not have their constructor
+        // names listed in the preferences are enabled by default.
+        return providers.filter(function (provider) {
+            var prefKey = "codehint." + provider.provider.constructor.name;
+            return PreferencesManager.get(prefKey) !== false;
+        });
+    }
+
+    var _beginSession;
+
+    /**
+     * End the current hinting session
+     */
+    function _endSession() {
+        if (!hintList) {
+            return;
+        }
+        hintList.close();
+        hintList = null;
+        codeHintOpened = false;
+        keyDownEditor = null;
+        sessionProvider = null;
+        sessionEditor = null;
+        if (deferredHints) {
+            deferredHints.reject();
+            deferredHints = null;
+        }
+    }
+
+    /**
+     * Is there a hinting session active for a given editor?
+     *
+     * NOTE: the sessionEditor, sessionProvider and hintList objects are
+     * only guaranteed to be initialized during an active session.
+     *
+     * @param {Editor} editor
+     * @return boolean
+     */
+    function _inSession(editor) {
+        if (sessionEditor) {
+            if (sessionEditor === editor &&
+                    (hintList.isOpen() ||
+                     (deferredHints && deferredHints.state() === "pending"))) {
+                return true;
+            } else {
+                // the editor has changed
+                _endSession();
+            }
+        }
+        return false;
+    }
+    /**
+     * From an active hinting session, get hints from the current provider and
+     * render the hint list window.
+     *
+     * Assumes that it is called when a session is active (i.e. sessionProvider is not null).
+     */
+    function _updateHintList(callMoveUpEvent) {
+
+        callMoveUpEvent = typeof callMoveUpEvent === "undefined" ? false : callMoveUpEvent;
+
+        if (deferredHints) {
+            deferredHints.reject();
+            deferredHints = null;
+        }
+
+        if (callMoveUpEvent) {
+            return hintList.callMoveUp(callMoveUpEvent);
+        }
+
+        var response = sessionProvider.getHints(lastChar);
+        lastChar = null;
+
+        if (!response) {
+            // the provider wishes to close the session
+            _endSession();
+        } else {
+            // if the response is true, end the session and begin another
+            if (response === true) {
+                var previousEditor = sessionEditor;
+
+                _endSession();
+                _beginSession(previousEditor);
+            } else if (response.hasOwnProperty("hints")) { // a synchronous response
+                if (hintList.isOpen()) {
+                    // the session is open
+                    hintList.update(response);
+                } else {
+                    hintList.open(response);
+                }
+            } else { // response is a deferred
+                deferredHints = response;
+                response.done(function (hints) {
+                    // Guard against timing issues where the session ends before the
+                    // response gets a chance to execute the callback.  If the session
+                    // ends first while still waiting on the response, then hintList
+                    // will get cleared up.
+                    if (!hintList) {
+                        return;
+                    }
+
+                    if (hintList.isOpen()) {
+                        // the session is open
+                        hintList.update(hints);
+                    } else {
+                        hintList.open(hints);
+                    }
+                });
+            }
+        }
+    }
+
+    /**
+     * Try to begin a new hinting session.
+     * @param {Editor} editor
+     */
+    _beginSession = function (editor) {
+
+        if (!codeHintsEnabled) {
             return;
         }
 
-        this.updateList();
-    
-        if (this.displayList.length) {
-            // Need to add the menu to the DOM before trying to calculate its ideal location.
-            $("#codehint-menu-bar > ul").append(this.$hintMenu);
-            
-            var hintPos = this.calcHintListLocation();
-            
-            this.$hintMenu.addClass("open")
-                       .css({"left": hintPos.left, "top": hintPos.top});
-            this.opened = true;
-            
-            PopUpManager.addPopUp(this.$hintMenu,
-                function () {
-                    self.close();
-                },
-                true);
-        }
-    };
-
-    /**
-     * Closes the hint list
-     */
-    CodeHintList.prototype.close = function () {
-        // TODO: Due to #1381, this won't get called if the user clicks out of the code hint menu.
-        // That's (sort of) okay right now since it doesn't really matter if a single old invisible
-        // code hint list is lying around (it'll get closed the next time the user pops up a code
-        // hint). Once #1381 is fixed this issue should go away.
-        this.$hintMenu.removeClass("open");
-        this.opened = false;
-        this.currentProvider = null;
-        
-        PopUpManager.removePopUp(this.$hintMenu);
-        this.$hintMenu.remove();
-        if (hintList === this) {
-            hintList = null;
-            shouldShowHintsOnChange = false;
-            keyDownEditor = null;
-        }
-    };
-        
-    /**
-     * Computes top left location for hint list so that the list is not clipped by the window
-     * @return {Object.<left: Number, top: Number> }
-     */
-    CodeHintList.prototype.calcHintListLocation = function () {
-        var cursor = this.editor._codeMirror.cursorCoords(),
-            posTop  = cursor.y,
-            posLeft = cursor.x,
-            $window = $(window),
-            $menuWindow = this.$hintMenu.children("ul");
-
-        // TODO Ty: factor out menu repositioning logic so code hints and Context menus share code
-        // adjust positioning so menu is not clipped off bottom or right
-        var bottomOverhang = posTop + 25 + $menuWindow.height() - $window.height();
-        if (bottomOverhang > 0) {
-            posTop -= (27 + $menuWindow.height());
-        }
-        // todo: should be shifted by line height
-        posTop -= 15;   // shift top for hidden parent element
-        //posLeft += 5;
-
-        var rightOverhang = posLeft + $menuWindow.width() - $window.width();
-        if (rightOverhang > 0) {
-            posLeft = Math.max(0, posLeft - rightOverhang);
+        // Don't start a session if we have a multiple selection.
+        if (editor.getSelections().length > 1) {
+            return;
         }
 
-        return {left: posLeft, top: posTop};
-    };
+        // Find a suitable provider, if any
+        var language = editor.getLanguageForSelection(),
+            enabledProviders = _getProvidersForLanguageId(language.getId());
 
-    /**
-     * @private
-     * Calculate the number of items per scroll page. Used for PageUp and PageDown.
-     * @return {number}
-     */
-    CodeHintList.prototype.getItemsPerPage = function () {
-        var itemsPerPage = 1,
-            $items = this.$hintMenu.find("li"),
-            $view = this.$hintMenu.find("ul.dropdown-menu"),
-            itemHeight;
-
-        if ($items.length !== 0) {
-            itemHeight = $($items[0]).height();
-            if (itemHeight) {
-                // round down to integer value
-                itemsPerPage = Math.floor($view.height() / itemHeight);
-                itemsPerPage = Math.max(1, Math.min(itemsPerPage, $items.length));
+        enabledProviders.some(function (item, index) {
+            if (item.provider.hasHints(editor, lastChar)) {
+                sessionProvider = item.provider;
+                return true;
             }
-        }
+        });
 
-        return itemsPerPage;
-    };
-        
-     /**
-      * Show the code hint list near the current cursor position for the specified editor
-      * @param {Editor}
-      */
-    function showHint(editor) {
-        if (hintList) {
-            hintList.close();
+        // If a provider is found, initialize the hint list and update it
+        if (sessionProvider) {
+            var insertHintOnTab,
+                maxCodeHints = PreferencesManager.get("maxCodeHints");
+            if (sessionProvider.insertHintOnTab !== undefined) {
+                insertHintOnTab = sessionProvider.insertHintOnTab;
+            } else {
+                insertHintOnTab = PreferencesManager.get("insertHintOnTab");
+            }
+
+            sessionEditor = editor;
+            hintList = new CodeHintList(sessionEditor, insertHintOnTab, maxCodeHints);
+            hintList.onHighlight(function ($hint) {
+                // If the current hint provider listening for hint item highlight change
+                if (sessionProvider.onHighlight) {
+                    sessionProvider.onHighlight($hint);
+                }
+            });
+            hintList.onSelect(function (hint) {
+                var restart = sessionProvider.insertHint(hint),
+                    previousEditor = sessionEditor;
+                _endSession();
+                if (restart) {
+                    _beginSession(previousEditor);
+                }
+            });
+            hintList.onClose(_endSession);
+
+            _updateHintList();
+        } else {
+            lastChar = null;
         }
-        hintList = new CodeHintList();
-        hintList.open(editor);
-    }
-    
+    };
+
     /**
-     * Handles keys related to displaying, searching, and navigating the hint list
+     * Handles keys related to displaying, searching, and navigating the hint list.
+     * This gets called before handleChange.
+     *
+     * TODO: Ideally, we'd get a more semantic event from the editor that told us
+     * what changed so that we could do all of this logic without looking at
+     * key events. Then, the purposes of handleKeyEvent and handleChange could be
+     * combined. Doing this well requires changing CodeMirror.
+     *
+     * @param {Event} jqEvent
      * @param {Editor} editor
      * @param {KeyboardEvent} event
      */
-    function handleKeyEvent(editor, event) {
-        var provider = null;
-        
-        // Check for Control+Space
-        if (event.type === "keydown" && event.keyCode === 32 && event.ctrlKey) {
-            showHint(editor);
-            event.preventDefault();
-        } else if (event.type === "keypress") {
-            // Check if any provider wants to show hints on this key.
-            $.each(hintProviders, function (index, item) {
-                if (item.shouldShowHintsOnKey(String.fromCharCode(event.charCode))) {
-                    provider = item;
-                    return false;
-                }
-            });
-            
-            shouldShowHintsOnChange = !!provider;
-            if (shouldShowHintsOnChange) {
-                keyDownEditor = editor;
+    function _handleKeydownEvent(jqEvent, editor, event) {
+        keyDownEditor = editor;
+        if (!(event.ctrlKey || event.altKey || event.metaKey) &&
+                (event.keyCode === KeyEvent.DOM_VK_ENTER ||
+                 event.keyCode === KeyEvent.DOM_VK_RETURN ||
+                 event.keyCode === KeyEvent.DOM_VK_TAB)) {
+            lastChar = String.fromCharCode(event.keyCode);
+        }
+    }
+    function _handleKeypressEvent(jqEvent, editor, event) {
+        keyDownEditor = editor;
+
+        // Last inserted character, used later by handleChange
+        lastChar = String.fromCharCode(event.charCode);
+
+        // Pending Text is used in hintList._keydownHook()
+        if (hintList) {
+            hintList.addPendingText(lastChar);
+        }
+    }
+    function _handleKeyupEvent(jqEvent, editor, event) {
+        keyDownEditor = editor;
+        if (_inSession(editor)) {
+          if (event.keyCode === KeyEvent.DOM_VK_HOME || 
+                  event.keyCode === KeyEvent.DOM_VK_END) {
+                _endSession();
+            } else if (event.keyCode === KeyEvent.DOM_VK_LEFT ||
+                       event.keyCode === KeyEvent.DOM_VK_RIGHT ||
+                       event.keyCode === KeyEvent.DOM_VK_BACK_SPACE) {
+                // Update the list after a simple navigation.
+                // We do this in "keyup" because we want the cursor position to be updated before
+                // we redraw the list.
+                _updateHintList();
+            } else if (event.ctrlKey && event.keyCode === KeyEvent.DOM_VK_SPACE) {
+                _updateHintList(event);
             }
         }
+    }
 
-        // Pass to the hint list, if it's open
-        if (hintList && hintList.isOpen()) {
-            hintList.handleKeyEvent(editor, event);
+    /**
+     * Handle a selection change event in the editor. If the selection becomes a
+     * multiple selection, end our current session.
+     * @param {BracketsEvent} event
+     * @param {Editor} editor
+     */
+    function _handleCursorActivity(event, editor) {
+        if (_inSession(editor)) {
+            if (editor.getSelections().length > 1) {
+                _endSession();
+            }
         }
     }
-    
+
     /**
+     * Start a new implicit hinting session, or update the existing hint list.
+     * Called by the editor after handleKeyEvent, which is responsible for setting
+     * the lastChar.
      *
+     * @param {Event} event
+     * @param {Editor} editor
+     * @param {{from: Pos, to: Pos, text: Array, origin: string}} changeList
      */
-    function handleChange(editor) {
-        if (shouldShowHintsOnChange && keyDownEditor === editor) {
-            shouldShowHintsOnChange = false;
+    function _handleChange(event, editor, changeList) {
+        if (lastChar && editor === keyDownEditor) {
             keyDownEditor = null;
-            showHint(editor);
+            if (_inSession(editor)) {
+                var charToRetest = lastChar;
+                _updateHintList();
+
+                // _updateHintList() may end a hinting session and clear lastChar, but a
+                // different provider may want to start a new session with the same character.
+                // So check whether current provider terminates the current hinting
+                // session. If so, then restore lastChar and restart a new session.
+                if (!_inSession(editor)) {
+                    lastChar = charToRetest;
+                    _beginSession(editor);
+                }
+            } else {
+                _beginSession(editor);
+            }
+
+            // Pending Text is used in hintList._keydownHook()
+            if (hintList && changeList[0] && changeList[0].text.length && changeList[0].text[0].length) {
+                var expectedLength = editor.getCursorPos().ch - changeList[0].from.ch,
+                    newText = changeList[0].text[0];
+                // We may get extra text in newText since some features like auto
+                // close braces can append some text automatically.
+                // See https://github.com/adobe/brackets/issues/6345#issuecomment-32548064
+                // as an example of this scenario.
+                if (newText.length > expectedLength) {
+                    // Strip off the extra text before calling removePendingText.
+                    newText = newText.substr(0, expectedLength);
+                }
+                hintList.removePendingText(newText);
+            }
         }
     }
 
     /**
-     * Registers an object that is able to provide code hints. When the user requests a code
-     * hint getQueryInfo() will be called on every hint provider. Providers should examine
-     * the state of the editor and return a search query object with a filter string if hints 
-     * can be provided. search() will then be called allowing the hint provider to create a 
-     * list of hints for the search query. When the user chooses a hint handleSelect() is called
-     * so that the hint provider can insert the hint into the editor.
+     * Test whether the provider has an exclusion that is still the same as text after the cursor.
      *
-     * @param {Object.< getQueryInfo: function(editor, cursor),
-     *                  search: function(string),
-     *                  handleSelect: function(string, Editor, cursor),
-     *                  shouldShowHintsOnKey: function(string)>}
-     *
-     * Parameter Details:
-     * - getQueryInfo - examines cursor location of editor and returns an object representing
-     *      the search query to be used for hinting. queryStr is a required property of the search object
-     *      and a client may provide other properties on the object to carry more context about the query.
-     * - search - takes a query object and returns an array of hint strings based on the queryStr property
-     *      of the query object.
-     * - handleSelect - takes a completion string and inserts it into the editor near the cursor
-     *      position. It should return true by default to close the hint list, but if the code hint provider
-     *      can return false if it wants to keep the hint list open and continue with a updated list. 
-     * - shouldShowHintsOnKey - inspects the char code and returns true if it wants to show code hints on that key.
+     * @param {string} exclusion - Text not to be overwritten when the provider inserts the selected hint.
+     * @param {string} textAfterCursor - Text that is immediately after the cursor position.
+     * @return {boolean} true if the exclusion is not null and is exactly the same as textAfterCursor,
+     * false otherwise.
      */
-    function registerHintProvider(providerInfo) {
-        hintProviders.push(providerInfo);
+    function hasValidExclusion(exclusion, textAfterCursor) {
+        return (exclusion && exclusion === textAfterCursor);
+    }
+
+    /**
+     *  Test if a hint popup is open.
+     *
+     * @return {boolean} - true if the hints are open, false otherwise.
+     */
+    function isOpen() {
+        return (hintList && hintList.isOpen());
+    }
+
+    /**
+     * Explicitly start a new session. If we have an existing session,
+     * then close the current one and restart a new one.
+     * @param {Editor} editor
+     */
+    function _startNewSession(editor) {
+        if (isOpen()) {
+            return;
+        }
+
+        if (!editor) {
+            editor = EditorManager.getFocusedEditor();
+        }
+        if (editor) {
+            lastChar = null;
+            if (_inSession(editor)) {
+                _endSession();
+            }
+
+            // Begin a new explicit session
+            _beginSession(editor);
+        }
     }
 
     /**
@@ -458,11 +691,47 @@ define(function (require, exports, module) {
     function _getCodeHintList() {
         return hintList;
     }
-    
-    // Define public API
-    exports.handleKeyEvent          = handleKeyEvent;
-    exports.handleChange            = handleChange;
-    exports.showHint                = showHint;
+
+    function activeEditorChangeHandler(event, current, previous) {
+        if (current) {
+            current.on("editorChange", _handleChange);
+            current.on("keydown",  _handleKeydownEvent);
+            current.on("keypress", _handleKeypressEvent);
+            current.on("keyup",    _handleKeyupEvent);
+            current.on("cursorActivity", _handleCursorActivity);
+        }
+
+        if (previous) {
+            //Removing all old Handlers
+            previous.off("editorChange", _handleChange);
+            previous.off("keydown",  _handleKeydownEvent);
+            previous.off("keypress", _handleKeypressEvent);
+            previous.off("keyup",    _handleKeyupEvent);
+            previous.off("cursorActivity", _handleCursorActivity);
+        }
+    }
+
+    activeEditorChangeHandler(null, EditorManager.getActiveEditor(), null);
+
+    EditorManager.on("activeEditorChange", activeEditorChangeHandler);
+ 
+    // Dismiss code hints before executing any command other than showing code hints since the command
+    // may make the current hinting session irrevalent after execution.
+    // For example, when the user hits Ctrl+K to open Quick Doc, it is
+    // pointless to keep the hint list since the user wants to view the Quick Doc
+    CommandManager.on("beforeExecuteCommand", function (event, commandId) {
+        if (commandId !== Commands.SHOW_CODE_HINTS) {
+            _endSession();
+        }
+    });
+
+    CommandManager.register(Strings.CMD_SHOW_CODE_HINTS, Commands.SHOW_CODE_HINTS, _startNewSession);
+
     exports._getCodeHintList        = _getCodeHintList;
+    exports._removeHintProvider     = _removeHintProvider;
+
+    // Define public API
+    exports.isOpen                  = isOpen;
     exports.registerHintProvider    = registerHintProvider;
+    exports.hasValidExclusion       = hasValidExclusion;
 });

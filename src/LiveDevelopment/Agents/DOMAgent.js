@@ -1,29 +1,25 @@
 /*
- * Copyright (c) 2012 Adobe Systems Incorporated. All rights reserved.
- *  
+ * Copyright (c) 2012 - present Adobe Systems Incorporated. All rights reserved.
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"), 
- * to deal in the Software without restriction, including without limitation 
- * the rights to use, copy, modify, merge, publish, distribute, sublicense, 
- * and/or sell copies of the Software, and to permit persons to whom the 
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
  * Software is furnished to do so, subject to the following conditions:
- *  
+ *
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- *  
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
- * 
+ *
  */
-
-
-/*jslint vars: true, plusplus: true, devel: true, nomen: true, indent: 4, forin: true, maxerr: 50, regexp: true */
-/*global define, $, XMLHttpRequest */
 
 /**
  * DOMAgent constructs and maintains a tree of {DOMNode}s that represents the
@@ -38,12 +34,11 @@
 define(function DOMAgent(require, exports, module) {
     "use strict";
 
-    var $exports = $(exports);
-
-    var Inspector = require("LiveDevelopment/Inspector/Inspector");
-    var RemoteAgent = require("LiveDevelopment/Agents/RemoteAgent");
-    var DOMNode = require("LiveDevelopment/Agents/DOMNode");
-    var DOMHelpers = require("LiveDevelopment/Agents/DOMHelpers");
+    var Inspector       = require("LiveDevelopment/Inspector/Inspector"),
+        EventDispatcher = require("utils/EventDispatcher"),
+        EditAgent       = require("LiveDevelopment/Agents/EditAgent"),
+        DOMNode         = require("LiveDevelopment/Agents/DOMNode"),
+        DOMHelpers      = require("LiveDevelopment/Agents/DOMHelpers");
 
     var _load; // {$.Deferred} load promise
     var _idToNode; // {nodeId -> node}
@@ -122,14 +117,6 @@ define(function DOMAgent(require, exports, module) {
         Inspector.DOM.requestChildNodes(node.nodeId);
     }
 
-    /** Resolve a node
-     * @param {DOMNode} node
-     */
-    function resolveNode(node, callback) {
-        console.assert(node.nodeId, "Attempted to resolve node without id");
-        Inspector.DOM.resolveNode(node.nodeId, callback);
-    }
-
     /** Eliminate the query string from a URL
      * @param {string} URL
      */
@@ -187,7 +174,8 @@ define(function DOMAgent(require, exports, module) {
             }
         };
         request.onerror = function onError() {
-            _load.reject("Could not load source file at " + exports.url);
+            var msg = "Could not load source file at " + exports.url;
+            _load.reject(msg, { message: msg });
         };
         request.send(null);
     }
@@ -196,7 +184,7 @@ define(function DOMAgent(require, exports, module) {
     function _onLoadEventFired(event, res) {
         // res = {timestamp}
         Inspector.DOM.getDocument(function onGetDocument(res) {
-            $exports.triggerHandler("getDocument", res);
+            exports.trigger("getDocument", res);
             // res = {root}
             _idToNode = {};
             _pendingRequests = 0;
@@ -207,7 +195,9 @@ define(function DOMAgent(require, exports, module) {
     // WebInspector Event: Page.frameNavigated
     function _onFrameNavigated(event, res) {
         // res = {frame}
-        exports.url = _cleanURL(res.frame.url);
+        if (!res.frame.parentId) {
+            exports.url = _cleanURL(res.frame.url);
+        }
     }
 
      // WebInspector Event: DOM.documentUpdated
@@ -274,7 +264,10 @@ define(function DOMAgent(require, exports, module) {
             value += text;
             value += node.value.substr(to - node.location);
             node.value = value;
-            Inspector.DOM.setNodeValue(node.nodeId, node.value);
+            if (!EditAgent.isEditing) {
+                // only update the DOM if the change was not caused by the edit agent
+                Inspector.DOM.setNodeValue(node.nodeId, node.value);
+            }
         } else {
             console.warn("Changing non-text nodes not supported.");
         }
@@ -286,34 +279,51 @@ define(function DOMAgent(require, exports, module) {
                 if (n.location > node.location) {
                     n.location += delta;
                 }
+                if (n.closeLocation !== undefined && n.closeLocation > node.location) {
+                    n.closeLocation += delta;
+                }
             });
         }
     }
 
+    /** Enable the domain */
+    function enable() {
+        return Inspector.DOM.enable();
+    }
+
+    /** Disable the domain */
+    function disable() {
+        return Inspector.DOM.disable();
+    }
+
+
     /** Initialize the agent */
     function load() {
         _load = new $.Deferred();
-        $(Inspector.Page)
+        Inspector.Page
             .on("frameNavigated.DOMAgent", _onFrameNavigated)
             .on("loadEventFired.DOMAgent", _onLoadEventFired);
-        $(Inspector.DOM)
+        Inspector.DOM
             .on("documentUpdated.DOMAgent", _onDocumentUpdated)
             .on("setChildNodes.DOMAgent", _onSetChildNodes)
             .on("childNodeCountUpdated.DOMAgent", _onChildNodeCountUpdated)
             .on("childNodeInserted.DOMAgent", _onChildNodeInserted)
             .on("childNodeRemoved.DOMAgent", _onChildNodeRemoved);
-        Inspector.Page.enable();
-        Inspector.Page.reload();
         return _load.promise();
     }
 
     /** Clean up */
     function unload() {
-        $(Inspector.Page).off(".DOMAgent");
-        $(Inspector.DOM).off(".DOMAgent");
+        Inspector.Page.off(".DOMAgent");
+        Inspector.DOM.off(".DOMAgent");
     }
 
+
+    EventDispatcher.makeEventDispatcher(exports);
+
     // Export private functions
+    exports.enable = enable;
+    exports.disable = disable;
     exports.nodeBeforeLocation = nodeBeforeLocation;
     exports.allNodesAtLocation = allNodesAtLocation;
     exports.nodeAtLocation = nodeAtLocation;
